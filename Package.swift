@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "Signals",
     platforms: [
-        .watchOS("9.0")
+        .watchOS("8.0")
     ],
     products: [
         .library(name: "Signals", targets: ["Signals"]),
