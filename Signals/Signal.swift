@@ -32,6 +32,7 @@ final public class Signal<T> {
     /// All the observers of to the `Signal`.
     public var observers:[AnyObject] {
         get {
+            listenersLock.lock(); defer { listenersLock.unlock() }
             return signalListeners.filter {
                 return $0.observer != nil
                 }.map {
@@ -42,6 +43,12 @@ final public class Signal<T> {
     }
     
     private var signalListeners = [SignalSubscription<T>]()
+
+    /// Serializes every access to `signalListeners`. The Signal may be fired on the main
+    /// thread while subscribe/cancel run on background threads (WCSession / notification
+    /// callbacks); without this, concurrent array mutation corrupts the listener buffer and a
+    /// later weak-observer load aborts with swift_abortRetainOverflow (SIGABRT on launch).
+    private let listenersLock = NSLock()
     
     /// Initializer.
     /// 
@@ -61,7 +68,7 @@ final public class Signal<T> {
     public func subscribe(with observer: AnyObject, callback: @escaping SignalCallback) -> SignalSubscription<T> {
         flushCancelledListeners()
         let signalListener = SignalSubscription<T>(observer: observer, callback: callback)
-        signalListeners.append(signalListener)
+        listenersLock.lock(); signalListeners.append(signalListener); listenersLock.unlock()
         return signalListener
     }
     
@@ -127,7 +134,13 @@ final public class Signal<T> {
         lastDataFired = retainLastData ? data : nil
         flushCancelledListeners()
         
-        for signalListener in signalListeners {
+        // Snapshot under the lock, then dispatch outside it so listener callbacks may
+        // freely subscribe/cancel and we never hold the lock across user code.
+        listenersLock.lock()
+        let listeners = signalListeners
+        listenersLock.unlock()
+
+        for signalListener in listeners {
             if signalListener.filter == nil || signalListener.filter!(data) == true {
                 _ = signalListener.dispatch(data: data)
             }
@@ -138,6 +151,7 @@ final public class Signal<T> {
     ///
     /// - parameter observer: The observer whose subscriptions to cancel
     public func cancelSubscription(for observer: AnyObject) {
+        listenersLock.lock(); defer { listenersLock.unlock() }
         signalListeners = signalListeners.filter {
             if let definiteListener:AnyObject = $0.observer {
                 return definiteListener !== observer
@@ -148,6 +162,7 @@ final public class Signal<T> {
     
     /// Cancels all subscriptions for the `Signal`.
     public func cancelAllSubscriptions() {
+        listenersLock.lock(); defer { listenersLock.unlock() }
         signalListeners.removeAll(keepingCapacity: false)
     }
     
@@ -159,6 +174,7 @@ final public class Signal<T> {
     // MARK: - Private Interface
     
     private func flushCancelledListeners() {
+        listenersLock.lock(); defer { listenersLock.unlock() }
         var removeListeners = false
         for signalListener in signalListeners {
             if signalListener.observer == nil {
